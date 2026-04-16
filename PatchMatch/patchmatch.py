@@ -24,7 +24,6 @@ import cv2
 from scipy.ndimage import binary_erosion, distance_transform_edt
 
 
-# patch distance
 def patch_distance(a, b, A_pad, B, patch_size):
     """
     Normalized MSE between the patch centered at a (in A) and the patch centered at b (in B)
@@ -37,6 +36,7 @@ def patch_distance(a, b, A_pad, B, patch_size):
     p = patch_size // 2
     pa = A_pad[a[0]:a[0] + patch_size, a[1]:a[1] + patch_size, :]
     pb = B[b[0] - p:b[0] + p + 1, b[1] - p:b[1] + p + 1, :]
+
     diff = pb - pa
     valid = np.sum(~np.isnan(diff))
     if valid == 0:
@@ -44,7 +44,6 @@ def patch_distance(a, b, A_pad, B, patch_size):
     return np.nansum(diff * diff) / valid
 
 
-# initialize
 def initialize(A, B, patch_size, seed=None):
     """
     Initializes a random NNF and NND
@@ -80,7 +79,6 @@ def initialize(A, B, patch_size, seed=None):
     return nnf, nnd, A_pad
 
 
-# propagate
 def propagate(nnf, nnd, A_pad, B_f, patch_size, x, y, is_odd):
     """
     PatchMatch propagation 
@@ -89,8 +87,8 @@ def propagate(nnf, nnd, A_pad, B_f, patch_size, x, y, is_odd):
     
     It updates nnf and nnd in-place
     """
-    H = A_pad.shape[0] - patch_size + 1   # original A height
-    W = A_pad.shape[1] - patch_size + 1   # original A width
+    H = A_pad.shape[0] - patch_size + 1
+    W = A_pad.shape[1] - patch_size + 1
     BH, BW = B_f.shape[:2]
     p = patch_size // 2
 
@@ -98,6 +96,7 @@ def propagate(nnf, nnd, A_pad, B_f, patch_size, x, y, is_odd):
     a = np.array([x, y], dtype=np.int32)
 
     candidates = []
+
     if is_odd:
         if x > 0:
             c = nnf[x - 1, y].copy()
@@ -127,7 +126,6 @@ def propagate(nnf, nnd, A_pad, B_f, patch_size, x, y, is_odd):
             nnd[x, y] = d
 
 
-# random search
 def random_search(nnf, nnd, A_pad, B_f, patch_size, x, y, alpha=0.5, attempts=2):
     """
     Random search with an exponentially shrinking window (factor alpha)
@@ -161,7 +159,6 @@ def random_search(nnf, nnd, A_pad, B_f, patch_size, x, y, alpha=0.5, attempts=2)
         radius = int(radius * alpha)
 
 
-# patchmatch
 def patchmatch(A, B, patch_size=5, iterations=5, alpha=0.5, attempts=2,
                seed=None, verbose=False):
     """
@@ -180,8 +177,10 @@ def patchmatch(A, B, patch_size=5, iterations=5, alpha=0.5, attempts=2,
         for i in rows:
             for j in cols:
                 propagate(nnf, nnd, A_pad, B_f, patch_size, i, j, is_odd)
-                random_search(nnf, nnd, A_pad, B_f, patch_size, i, j,
-                              alpha=alpha, attempts=attempts)
+                random_search(
+                    nnf, nnd, A_pad, B_f, patch_size, i, j,
+                    alpha=alpha, attempts=attempts
+                )
 
         if verbose:
             print(f"  it {it}/{iterations}  "
@@ -190,7 +189,42 @@ def patchmatch(A, B, patch_size=5, iterations=5, alpha=0.5, attempts=2,
     return nnf, nnd
 
 
-# reconstruct
+def patchmatch_history(A, B, patch_size=5, iterations=5, alpha=0.5, attempts=2,
+                       seed=None):
+    """
+    Patchmatch version that saves history:
+    - nnf_list
+    - nnd_list
+    - rms_list
+    """
+    nnf, nnd, A_pad = initialize(A, B, patch_size, seed=seed)
+    B_f = B.astype(np.float64)
+    H, W = A.shape[:2]
+
+    nnf_list = [nnf.copy()]
+    nnd_list = [nnd.copy()]
+    rms_list = [float(np.sqrt(np.maximum(nnd.mean(), 0.0)))]
+
+    for it in range(1, iterations + 1):
+        is_odd = (it % 2 == 1)
+        rows = range(H) if is_odd else range(H - 1, -1, -1)
+        cols = range(W) if is_odd else range(W - 1, -1, -1)
+
+        for i in rows:
+            for j in cols:
+                propagate(nnf, nnd, A_pad, B_f, patch_size, i, j, is_odd)
+                random_search(
+                    nnf, nnd, A_pad, B_f, patch_size, i, j,
+                    alpha=alpha, attempts=attempts
+                )
+
+        nnf_list.append(nnf.copy())
+        nnd_list.append(nnd.copy())
+        rms_list.append(float(np.sqrt(np.maximum(nnd.mean(), 0.0))))
+
+    return nnf_list, nnd_list, rms_list
+
+
 def reconstruct(nnf, B):
     """Pixel wise reconstruction: for each (i,j) in A, copy B[nnf[i,j]]"""
     H, W = nnf.shape[:2]
@@ -202,7 +236,30 @@ def reconstruct(nnf, B):
     return out
 
 
-# visualize_nnf
+def reconstruct_from_patches(nnf, B, patch_size=5):
+    H, W = nnf.shape[:2]
+    p = patch_size // 2
+
+    acc = np.zeros((H, W, 3), dtype=np.float64)
+    wgt = np.zeros((H, W), dtype=np.float64)
+
+    for i in range(H):
+        for j in range(W):
+            br, bc = nnf[i, j]
+            for di in range(-p, p + 1):
+                for dj in range(-p, p + 1):
+                    ai, aj = i + di, j + dj
+                    bi, bj = br + di, bc + dj
+                    if 0 <= ai < H and 0 <= aj < W and 0 <= bi < B.shape[0] and 0 <= bj < B.shape[1]:
+                        acc[ai, aj] += B[bi, bj].astype(np.float64)
+                        wgt[ai, aj] += 1.0
+
+    out = np.zeros((H, W, 3), dtype=np.float64)
+    valid = wgt > 1e-12
+    out[valid] = acc[valid] / wgt[valid, None]
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
 def visualize_nnf(nnf):
     """
     NNF visualization as HSV color map:
@@ -215,19 +272,18 @@ def visualize_nnf(nnf):
     dy = nnf[:, :, 0].astype(np.float64) - grid_y
     dx = nnf[:, :, 1].astype(np.float64) - grid_x
 
-    angle = (np.arctan2(dy, dx) + np.pi) / (2 * np.pi)    # [0,1]
+    angle = (np.arctan2(dy, dx) + np.pi) / (2 * np.pi)
     mag = np.sqrt(dx ** 2 + dy ** 2)
-    mag = mag / (mag.max() + 1e-8)                        # [0,1]
+    mag = mag / (mag.max() + 1e-8)
 
     hsv = np.zeros((H, W, 3), dtype=np.uint8)
-    hsv[:, :, 0] = (angle * 179).astype(np.uint8)         # OpenCV H ∈ [0,179]
+    hsv[:, :, 0] = (angle * 179).astype(np.uint8)
     hsv[:, :, 1] = 255
     hsv[:, :, 2] = (mag * 255).astype(np.uint8)
 
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
-
-# inpainting
+# Inpainting
 def create_rect_mask(shape, r0, c0, r1, c1):
     """Creates rectangular boolean mask"""
     mask = np.zeros(shape[:2], dtype=bool)
@@ -279,16 +335,20 @@ def _patch_distance_masked(img, source, a_r, a_c, b_r, b_c, patch_size, conf):
     h, w = img.shape[:2]
     p = patch_size // 2
 
-    ar0 = max(a_r - p, 0); ar1 = min(a_r + p + 1, h)
-    ac0 = max(a_c - p, 0); ac1 = min(a_c + p + 1, w)
+    ar0 = max(a_r - p, 0)
+    ar1 = min(a_r + p + 1, h)
+    ac0 = max(a_c - p, 0)
+    ac1 = min(a_c + p + 1, w)
 
     dr0 = ar0 - (a_r - p)
     dc0 = ac0 - (a_c - p)
     dr1 = dr0 + (ar1 - ar0)
     dc1 = dc0 + (ac1 - ac0)
 
-    br0 = b_r - p + dr0; br1 = b_r - p + dr1
-    bc0 = b_c - p + dc0; bc1 = b_c - p + dc1
+    br0 = b_r - p + dr0
+    br1 = b_r - p + dr1
+    bc0 = b_c - p + dc0
+    bc1 = b_c - p + dc1
 
     if br0 < 0 or bc0 < 0 or br1 > h or bc1 > w:
         return np.inf
@@ -308,13 +368,16 @@ def _init_nnf_inpainting(h, w, valid_centers, patch_size, seed=None):
     """Random NNF with centers chosen between the valid ones (known patch)"""
     if seed is not None:
         np.random.seed(seed)
+
     coords = np.argwhere(valid_centers)
     nnf = np.zeros((h, w, 2), dtype=np.int32)
+
     if len(coords) == 0:
         p = patch_size // 2
         nnf[:, :, 0] = np.random.randint(p, max(h - p, p + 1), size=(h, w))
         nnf[:, :, 1] = np.random.randint(p, max(w - p, p + 1), size=(h, w))
         return nnf
+
     idx = np.random.randint(0, len(coords), size=(h, w))
     nnf[:, :, 0] = coords[idx, 0]
     nnf[:, :, 1] = coords[idx, 1]
@@ -352,7 +415,6 @@ def _patchmatch_inpainting(img, source, mask, patch_size, pm_iters, conf,
                 best = nnd[i, j]
                 br, bc = nnf[i, j]
 
-                # propagation
                 cand_list = []
                 if is_odd:
                     if i > 0:
@@ -384,7 +446,6 @@ def _patchmatch_inpainting(img, source, mask, patch_size, pm_iters, conf,
                         best = d
                         br, bc = rr, cc
 
-                # random search
                 radius = max(h, w)
                 while radius >= 1:
                     r0 = int(max(br - radius, p))
@@ -414,6 +475,7 @@ def _vote(img, source, nnf, mask, patch_size, conf):
     """Weighted average of overlapping patches, which updates only the pixels inside the hole (mask=True)"""
     h, w = img.shape[:2]
     p = patch_size // 2
+
     acc = np.zeros((h, w, 3), dtype=np.float64)
     wgt = np.zeros((h, w), dtype=np.float64)
 
@@ -421,6 +483,7 @@ def _vote(img, source, nnf, mask, patch_size, conf):
         for j in range(w):
             br, bc = nnf[i, j]
             weight_ij = float(conf[i, j])
+
             for di in range(-p, p + 1):
                 for dj in range(-p, p + 1):
                     ai = i + di
@@ -468,7 +531,6 @@ def multiscale_inpainting(img, mask, patch_size=5, num_scales=3,
         source[mk_s] = cur[mk_s]
 
         for em in range(1, em_iters + 1):
-            # confidence: known pixels = 1.0, masked pixels increase over EM iterations
             conf = np.ones((h, w), dtype=np.float64)
             conf[mk_s] = 0.1 + 0.9 * (em / em_iters)
 
